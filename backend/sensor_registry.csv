@@ -1,0 +1,6 @@
+sensor_id,latitude,longitude,state,district,city,locality
+AWS_001,22.5726,88.3639,West Bengal,Kolkata,Kolkata,Central Kolkata
+AWS_002,22.5958,88.41,West Bengal,Kolkata,Kolkata,Salt Lake
+AWS_003,22.52,88.35,West Bengal,Kolkata,Kolkata,South Kolkata
+AWS_004,22.61,88.39,West Bengal,Kolkata,Kolkata,Lake Town
+AWS_005,22.55,88.43,West Bengal,Kolkata,Kolkata,Eastern Kolkata
