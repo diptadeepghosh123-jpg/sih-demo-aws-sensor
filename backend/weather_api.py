@@ -1,4 +1,5 @@
 import os
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
@@ -207,14 +208,51 @@ def get_weather_for_sensor(sensor):
         "key": WINDY_API_KEY
     }
 
-    response = requests.post(
-        WINDY_URL,
-        json=payload,
-        timeout=30
-    )
+    # --------------------------------------------------------
+    # API REQUEST WITH SMALL RETRY FOR TRANSIENT TLS ERRORS
+    # --------------------------------------------------------
 
-    response.raise_for_status()
+    max_attempts = 3
+    response = None
 
+    for attempt in range(1, max_attempts + 1):
+
+        try:
+
+            response = requests.post(
+                WINDY_URL,
+                json=payload,
+                headers={
+                    "Connection": "close"
+                },
+                timeout=30
+            )
+
+            response.raise_for_status()
+            break
+
+        except (
+            requests.exceptions.SSLError,
+            requests.exceptions.ConnectionError
+        ) as error:
+
+            if attempt == max_attempts:
+                raise
+
+            wait_seconds = 1.5 * attempt
+
+            print(
+                f"⚠ {sensor_id}: transient network/TLS error "
+                f"(attempt {attempt}/{max_attempts})"
+            )
+
+            print(
+                f"  Retrying in {wait_seconds:.1f}s..."
+            )
+
+            time.sleep(wait_seconds)
+
+    # requests succeeded; decode JSON exactly once.
     data = response.json()
 
     # --------------------------------------------------------
@@ -613,7 +651,7 @@ def get_sensor_data():
 
     # 6 is a concurrency cap, not a sensor-count limit — any number of
     # registered sensors is supported, just fetched in bounded batches.
-    worker_count = min(6, max(1, total_sensors))
+    worker_count = min(2, max(1, total_sensors))
 
     results_by_index = [None] * total_sensors
 
