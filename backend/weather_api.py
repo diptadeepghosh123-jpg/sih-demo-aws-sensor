@@ -1,6 +1,5 @@
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -15,9 +14,8 @@ from sensor_registry import get_all_sensors
 # WEATHER API
 # ============================================================
 
-# Load configuration from the places users commonly keep the project .env.
-# A non-blank process environment variable always wins.
-# Otherwise, try backend/.env, project/.env, then the current working directory.
+# Keep the old .env loading structure so the rest of the project
+# does not need any configuration changes.
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_DIR = os.path.dirname(BASE_DIR)
 ENV_FILES = [
@@ -26,120 +24,73 @@ ENV_FILES = [
     os.path.join(os.getcwd(), ".env"),
 ]
 
-_process_key = (os.getenv("WINDY_API_KEY") or "").strip()
-if not _process_key:
-    for _env_file in ENV_FILES:
-        if not os.path.isfile(_env_file):
-            continue
-        load_dotenv(_env_file, override=True)
-        if (os.getenv("WINDY_API_KEY") or "").strip():
-            break
+for _env_file in ENV_FILES:
+    if not os.path.isfile(_env_file):
+        continue
 
-WINDY_API_KEY = (os.getenv("WINDY_API_KEY") or "").strip().strip('"').strip("'")
+    load_dotenv(_env_file, override=False)
 
-if WINDY_API_KEY:
-    print("WINDY_API_KEY: loaded")
-else:
-    print("WINDY_API_KEY: missing (set it in environment or backend/.env)")
 
-WINDY_URL = "https://api.windy.com/api/point-forecast/v2"
-
-WINDY_MODEL = "gfs"
+# Open-Meteo does not require an API key for the free public endpoint.
+# The old WINDY_API_KEY can remain in .env; it is simply not used.
+OPENMETEO_URL = "https://api.open-meteo.com/v1/forecast"
 
 
 # ============================================================
 # HELPER FUNCTIONS
 # ============================================================
 
-def get_first_value(data, key):
+def convert_temperature_to_celsius(value, unit="°C"):
     """
-    Get the first value from a Windy API array.
-    """
-
-    if key not in data:
-        return None
-
-    value = data[key]
-
-    if isinstance(value, list):
-
-        if len(value) == 0:
-            return None
-
-        return value[0]
-
-    return value
-
-
-def convert_temperature_to_celsius(value, unit):
-    """
-    Convert Windy temperature to Celsius.
+    Convert temperature to Celsius.
+    Open-Meteo current temperature is returned in °C by default.
     """
 
     if value is None:
         return None
 
     value = float(value)
-
     unit = str(unit).lower()
 
     if unit in ["k", "kelvin"]:
         return value - 273.15
 
-    if unit in ["c", "°c", "degc", "celsius"]:
-        return value
-
-    # Safety fallback:
-    # The values returned by your current API are Kelvin.
-    return value - 273.15
+    return value
 
 
-def convert_pressure_to_hpa(value, unit):
+def convert_pressure_to_hpa(value, unit="hPa"):
     """
-    Convert Windy pressure to hPa.
+    Convert pressure to hPa.
+    Open-Meteo surface_pressure is returned in hPa.
     """
 
     if value is None:
         return None
 
     value = float(value)
-
     unit = str(unit).lower()
 
     if unit in ["pa", "pascal", "pascals"]:
         return value / 100.0
 
-    if unit in ["hpa", "mb", "mbar"]:
-        return value
-
-    # Safety fallback:
-    # Your current API is returning pressure in Pa.
-    return value / 100.0
+    return value
 
 
-def convert_humidity(value, unit):
+def convert_humidity(value, unit="%"):
     """
     Convert relative humidity to percentage.
+    Open-Meteo relative_humidity_2m is returned in %.
     """
 
     if value is None:
         return None
 
-    value = float(value)
-
-    unit = str(unit).lower()
-
-    if unit in ["%", "percent", "percentage"]:
-        return value
-
-    # Windy normally returns RH as percentage.
-    return value
+    return float(value)
 
 
 def convert_timestamp(timestamp):
     """
-    Convert Windy timestamp in milliseconds
-    to readable UTC time.
+    Convert an Open-Meteo ISO timestamp to readable UTC time.
     """
 
     if timestamp is None:
@@ -147,16 +98,19 @@ def convert_timestamp(timestamp):
 
     try:
 
-        timestamp = float(timestamp)
+        # Open-Meteo normally returns ISO8601, e.g.
+        # 2026-09-29T10:00
+        text = str(timestamp).strip()
 
-        # Windy uses milliseconds since Unix epoch.
-        if timestamp > 100000000000:
-            timestamp = timestamp / 1000.0
+        if text.endswith("Z"):
+            text = text[:-1] + "+00:00"
 
-        dt = datetime.fromtimestamp(
-            timestamp,
-            tz=timezone.utc
-        )
+        dt = datetime.fromisoformat(text)
+
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        else:
+            dt = dt.astimezone(timezone.utc)
 
         return dt.strftime(
             "%Y-%m-%d %H:%M:%S UTC"
@@ -167,50 +121,43 @@ def convert_timestamp(timestamp):
         return None
 
 
-# ============================================================
-# GET WEATHER FOR ONE SENSOR
-# ============================================================
+def request_openmeteo_weather(sensors):
+    """
+    Fetch all registered sensor locations in ONE Open-Meteo request.
 
-def get_weather_for_sensor(sensor):
+    Open-Meteo supports comma-separated latitude/longitude values for
+    multiple locations. The returned JSON is a list with one structure
+    per requested location.
+    """
 
-    sensor_id = str(sensor["sensor_id"])
+    if not sensors:
+        return []
 
-    latitude = float(sensor["latitude"])
-    longitude = float(sensor["longitude"])
+    latitudes = ",".join(
+        str(float(sensor["latitude"]))
+        for sensor in sensors
+    )
 
-    print("\n========================================")
-    print(f"Requesting weather for {sensor_id}")
-    print(f"Coordinates: {latitude}, {longitude}")
-    print("========================================")
+    longitudes = ",".join(
+        str(float(sensor["longitude"]))
+        for sensor in sensors
+    )
 
-    # --------------------------------------------------------
-    # API REQUEST
-    # --------------------------------------------------------
-
-    payload = {
-
-        "lat": latitude,
-
-        "lon": longitude,
-
-        "model": WINDY_MODEL,
-
-        "parameters": [
-            "temp",
-            "rh",
-            "pressure"
-        ],
-
-        "levels": [
-            "surface"
-        ],
-
-        "key": WINDY_API_KEY
+    params = {
+        "latitude": latitudes,
+        "longitude": longitudes,
+        "current": (
+            "temperature_2m,"
+            "relative_humidity_2m,"
+            "surface_pressure"
+        ),
+        "timezone": "UTC"
     }
 
-    # --------------------------------------------------------
-    # API REQUEST WITH SMALL RETRY FOR TRANSIENT TLS ERRORS
-    # --------------------------------------------------------
+    print("\n========================================")
+    print("Requesting Open-Meteo weather")
+    print(f"Locations: {len(sensors)}")
+    print("========================================")
 
     max_attempts = 3
     response = None
@@ -219,11 +166,12 @@ def get_weather_for_sensor(sensor):
 
         try:
 
-            response = requests.post(
-                WINDY_URL,
-                json=payload,
+            response = requests.get(
+                OPENMETEO_URL,
+                params=params,
                 headers={
-                    "Connection": "close"
+                    "Connection": "close",
+                    "User-Agent": "SkyGuard-AI/1.0"
                 },
                 timeout=30
             )
@@ -233,7 +181,8 @@ def get_weather_for_sensor(sensor):
 
         except (
             requests.exceptions.SSLError,
-            requests.exceptions.ConnectionError
+            requests.exceptions.ConnectionError,
+            requests.exceptions.Timeout
         ) as error:
 
             if attempt == max_attempts:
@@ -242,7 +191,7 @@ def get_weather_for_sensor(sensor):
             wait_seconds = 1.5 * attempt
 
             print(
-                f"⚠ {sensor_id}: transient network/TLS error "
+                "⚠ Open-Meteo transient network/TLS error "
                 f"(attempt {attempt}/{max_attempts})"
             )
 
@@ -252,47 +201,112 @@ def get_weather_for_sensor(sensor):
 
             time.sleep(wait_seconds)
 
-    # requests succeeded; decode JSON exactly once.
     data = response.json()
 
-    # --------------------------------------------------------
-    # CHECK RESPONSE
-    # --------------------------------------------------------
-
-    if not isinstance(data, dict):
+    if not isinstance(data, (dict, list)):
 
         raise ValueError(
-            "Invalid response received from Windy API."
+            "Invalid response received from Open-Meteo API."
+        )
+
+    return data
+
+
+# ============================================================
+# GET WEATHER FOR ONE SENSOR
+# ============================================================
+
+def get_weather_for_sensor(sensor, weather_data=None):
+
+    sensor_id = str(sensor["sensor_id"])
+
+    latitude = float(sensor["latitude"])
+    longitude = float(sensor["longitude"])
+
+    print("\n========================================")
+    print(f"Processing weather for {sensor_id}")
+    print(f"Coordinates: {latitude}, {longitude}")
+    print("========================================")
+
+    # If this function is called directly, request only this sensor.
+    if weather_data is None:
+
+        weather_data = request_openmeteo_weather(
+            [sensor]
+        )
+
+    # Open-Meteo returns a list for multiple locations and a dict
+    # for a single location.
+    if isinstance(weather_data, list):
+
+        if not weather_data:
+            raise ValueError(
+                f"No Open-Meteo data returned for {sensor_id}."
+            )
+
+        location_data = weather_data[0]
+
+    elif isinstance(weather_data, dict):
+
+        location_data = weather_data
+
+    else:
+
+        raise ValueError(
+            f"Invalid Open-Meteo location data for {sensor_id}."
+        )
+
+    if not isinstance(location_data, dict):
+
+        raise ValueError(
+            f"Invalid Open-Meteo location response for {sensor_id}."
+        )
+
+    # --------------------------------------------------------
+    # GET CURRENT WEATHER
+    # --------------------------------------------------------
+
+    current = location_data.get(
+        "current",
+        {}
+    )
+
+    current_units = location_data.get(
+        "current_units",
+        {}
+    )
+
+    if not isinstance(current, dict):
+
+        raise ValueError(
+            f"Missing current weather data for {sensor_id}."
         )
 
     # --------------------------------------------------------
     # SHOW RESPONSE FIELDS
     # --------------------------------------------------------
 
-    print("\nWindy response fields:")
+    print("\nOpen-Meteo response fields:")
 
-    for key in data.keys():
-
+    for key in location_data.keys():
         print(" -", key)
 
     # --------------------------------------------------------
     # GET UNITS
     # --------------------------------------------------------
 
-    units = data.get("units", {})
-
-    temp_unit = units.get(
-        "temp-surface",
-        "K"
+    temp_unit = current_units.get(
+        "temperature_2m",
+        "°C"
     )
 
-    pressure_unit = units.get(
-        "pressure-surface",
-        "Pa"
+    pressure_unit = current_units.get(
+        "surface_pressure",
+        "hPa"
     )
 
-    humidity_unit = units.get(
-        "rh-surface",
+    humidity_unit = current_units.get(
+        "relative_humidity_2m",
         "%"
     )
 
@@ -314,31 +328,23 @@ def get_weather_for_sensor(sensor):
     )
 
     # --------------------------------------------------------
-    # GET RAW VALUES
+    # GET CURRENT VALUES
     # --------------------------------------------------------
 
-    raw_temperature = get_first_value(
-        data,
-        "temp-surface"
+    raw_temperature = current.get(
+        "temperature_2m"
     )
 
-    raw_pressure = get_first_value(
-        data,
-        "pressure-surface"
+    raw_pressure = current.get(
+        "surface_pressure"
     )
 
-    raw_humidity = get_first_value(
-        data,
-        "rh-surface"
+    raw_humidity = current.get(
+        "relative_humidity_2m"
     )
 
-    # --------------------------------------------------------
-    # GET TIMESTAMP
-    # --------------------------------------------------------
-
-    raw_timestamp = get_first_value(
-        data,
-        "ts"
+    raw_timestamp = current.get(
+        "time"
     )
 
     # --------------------------------------------------------
@@ -377,13 +383,9 @@ def get_weather_for_sensor(sensor):
     # --------------------------------------------------------
     # ACTUAL FETCH TIME vs WEATHER MODEL TIME
     # --------------------------------------------------------
-    # Windy's "ts" is the model/forecast valid time, not the moment we
-    # polled the API. Using it as the sensor observation time produces
-    # large, misleading time gaps (e.g. ~6h) in the anomaly engine.
-    # We keep both: "weather_model_time" preserves Windy's own ts for
-    # reference/debugging, while "observation_time"/"timestamp" (used by
-    # anomaly.py's row_time()/time_gap()) reflect the actual moment this
-    # reading was fetched.
+    # Open-Meteo's current time represents the weather-model data time.
+    # The actual fetch time remains separate so anomaly.py does not see
+    # artificial multi-hour gaps caused by model timestamps.
 
     actual_fetch_time = datetime.now(timezone.utc).strftime(
         "%Y-%m-%d %H:%M:%S UTC"
@@ -419,8 +421,10 @@ def get_weather_for_sensor(sensor):
         # Real polling time - this is what anomaly/time-gap logic reads.
         "timestamp": actual_fetch_time,
         "observation_time": actual_fetch_time,
-        # Windy model/forecast valid time - kept separately for reference.
+
+        # Weather model valid time - kept separately for reference.
         "weather_model_time": weather_model_time,
+
         "actual_fetch_time": actual_fetch_time
     }
 
@@ -462,7 +466,7 @@ def get_weather_for_sensor(sensor):
 
 def build_api_failure_result(sensor, api_status, api_error=""):
     """
-    Preserve the registered sensor even when the live weather API fails.
+    Preserve the registered sensor even when the weather API fails.
 
     The anomaly engine uses api_status/api_error plus the missing weather
     values to classify the reading as DATA_UNAVAILABLE instead of silently
@@ -503,9 +507,8 @@ def get_sensor_data():
     print("       SKYGUARD AI WEATHER API")
     print("========================================")
 
-    # --------------------------------------------------------
-    # CHECK API KEY
-    # --------------------------------------------------------
+    print("Data source: Open-Meteo")
+    print("API key: Not required")
 
     # --------------------------------------------------------
     # LOAD SENSOR REGISTRY
@@ -523,27 +526,6 @@ def get_sensor_data():
         return pd.DataFrame()
 
     # --------------------------------------------------------
-    # CHECK API KEY
-    # --------------------------------------------------------
-
-    if not WINDY_API_KEY:
-
-        print("\nERROR:")
-        print("WINDY_API_KEY is missing.")
-        print("\nPreserving all registered sensors as CONFIG_ERROR rows.")
-
-        failure_rows = [
-            build_api_failure_result(
-                sensor,
-                "CONFIG_ERROR",
-                "WINDY_API_KEY is missing"
-            )
-            for sensor in sensors
-        ]
-
-        return pd.DataFrame(failure_rows)
-
-    # --------------------------------------------------------
     # CHECK SENSOR REGISTRY
     # --------------------------------------------------------
 
@@ -559,14 +541,116 @@ def get_sensor_data():
     )
 
     # --------------------------------------------------------
-    # REQUEST DATA (bounded parallel fetch)
+    # REQUEST DATA
     # --------------------------------------------------------
-    # Sensors are fetched concurrently so total request time does not
-    # grow linearly with sensor count. The worker pool size is capped
-    # (not tied to a fixed sensor count) so any number of registered
-    # sensors is supported.
+    # All registered sensors are sent in ONE Open-Meteo request.
+    # This keeps the API-call count low while preserving one result
+    # per sensor for the rest of SkyGuard.
 
-    def fetch_one(sensor):
+    try:
+
+        weather_data = request_openmeteo_weather(
+            sensors
+        )
+
+        if isinstance(weather_data, list):
+
+            if len(weather_data) != len(sensors):
+
+                raise ValueError(
+                    "Open-Meteo returned a different number of "
+                    "locations than requested."
+                )
+
+            location_data_by_index = weather_data
+
+        elif isinstance(weather_data, dict):
+
+            if len(sensors) != 1:
+
+                raise ValueError(
+                    "Open-Meteo returned a single location response "
+                    "for multiple requested sensors."
+                )
+
+            location_data_by_index = [weather_data]
+
+        else:
+
+            raise ValueError(
+                "Invalid Open-Meteo response."
+            )
+
+    except requests.exceptions.Timeout as error:
+
+        print(
+            "\n✗ Open-Meteo API timeout"
+        )
+
+        print(
+            f"  {error}"
+        )
+
+        failure_rows = [
+            build_api_failure_result(
+                sensor,
+                "API_TIMEOUT",
+                str(error) or "Open-Meteo API request timed out"
+            )
+            for sensor in sensors
+        ]
+
+        return pd.DataFrame(failure_rows)
+
+    except requests.exceptions.RequestException as error:
+
+        print(
+            "\n✗ Open-Meteo API request failed"
+        )
+
+        print(
+            f"  {error}"
+        )
+
+        failure_rows = [
+            build_api_failure_result(
+                sensor,
+                "API_ERROR",
+                str(error) or "Open-Meteo API request failed"
+            )
+            for sensor in sensors
+        ]
+
+        return pd.DataFrame(failure_rows)
+
+    except Exception as error:
+
+        print(
+            "\n✗ Open-Meteo API processing error"
+        )
+
+        print(
+            f"  {error}"
+        )
+
+        failure_rows = [
+            build_api_failure_result(
+                sensor,
+                "NETWORK_ERROR",
+                str(error) or "Unexpected Open-Meteo API failure"
+            )
+            for sensor in sensors
+        ]
+
+        return pd.DataFrame(failure_rows)
+
+    # --------------------------------------------------------
+    # BUILD SENSOR RESULTS
+    # --------------------------------------------------------
+
+    results = []
+
+    for index, sensor in enumerate(sensors):
 
         sensor_id = sensor.get(
             "sensor_id",
@@ -576,7 +660,8 @@ def get_sensor_data():
         try:
 
             result = get_weather_for_sensor(
-                sensor
+                sensor,
+                location_data_by_index[index]
             )
 
             # A successful request can still contain a missing weather
@@ -588,48 +673,24 @@ def get_sensor_data():
                 f"\n✓ {sensor_id} weather received"
             )
 
-            return result
-
-        except requests.exceptions.Timeout as error:
-
-            print(
-                f"\n✗ {sensor_id}: Windy API timeout"
-            )
-
-            return build_api_failure_result(
-                sensor,
-                "API_TIMEOUT",
-                str(error) or "Windy API request timed out"
-            )
-
-        except requests.exceptions.RequestException as error:
-
-            print(
-                f"\n✗ {sensor_id}: API request failed"
-            )
-            print(
-                f"  {error}"
-            )
-
-            return build_api_failure_result(
-                sensor,
-                "API_ERROR",
-                str(error) or "Windy API request failed"
-            )
+            results.append(result)
 
         except (ValueError, KeyError, TypeError) as error:
 
             print(
-                f"\n✗ {sensor_id}: invalid API response"
+                f"\n✗ {sensor_id}: invalid Open-Meteo response"
             )
+
             print(
                 f"  {error}"
             )
 
-            return build_api_failure_result(
-                sensor,
-                "INVALID_RESPONSE",
-                str(error) or "Invalid Windy API response"
+            results.append(
+                build_api_failure_result(
+                    sensor,
+                    "INVALID_RESPONSE",
+                    str(error) or "Invalid Open-Meteo API response"
+                )
             )
 
         except Exception as error:
@@ -637,46 +698,25 @@ def get_sensor_data():
             print(
                 f"\n✗ {sensor_id}: unexpected API error"
             )
+
             print(
                 f"  {error}"
             )
 
-            return build_api_failure_result(
-                sensor,
-                "NETWORK_ERROR",
-                str(error) or "Unexpected weather API failure"
-            )
-
-    total_sensors = len(sensors)
-
-    # 6 is a concurrency cap, not a sensor-count limit — any number of
-    # registered sensors is supported, just fetched in bounded batches.
-    worker_count = min(2, max(1, total_sensors))
-
-    results_by_index = [None] * total_sensors
-
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-
-        future_to_index = {
-            executor.submit(fetch_one, sensor): index
-            for index, sensor in enumerate(sensors)
-        }
-
-        for future in as_completed(future_to_index):
-
-            index = future_to_index[future]
-
-            try:
-                results_by_index[index] = future.result()
-            except Exception as error:
-                results_by_index[index] = build_api_failure_result(
-                    sensors[index],
+            results.append(
+                build_api_failure_result(
+                    sensor,
                     "NETWORK_ERROR",
                     str(error) or "Unexpected weather API failure"
                 )
+            )
 
     # Preserve original sensor-registry order for a stable dashboard.
-    results = [row for row in results_by_index if row is not None]
+    results = [
+        row
+        for row in results
+        if row is not None
+    ]
 
     # --------------------------------------------------------
     # CHECK RESULTS
