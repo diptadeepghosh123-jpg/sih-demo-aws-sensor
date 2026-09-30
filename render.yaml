@@ -1,0 +1,31 @@
+services:
+  # ------------------------------------------------------------
+  # Backend API (FastAPI + Machine Learning Engine)
+  # ------------------------------------------------------------
+  - type: web
+    name: skyguard-backend
+    runtime: python
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.5
+
+  # ------------------------------------------------------------
+  # Frontend Web Service (TanStack Start + Nitro SSR)
+  # ------------------------------------------------------------
+  - type: web
+    name: skyguard-frontend
+    runtime: node
+    plan: free
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_VERSION
+        value: 20.18.0
+      - key: VITE_API_BASE_URL
+        sync: false

@@ -1,11 +1,22 @@
-const API_BASE = import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+function getApiBase() {
+  if (typeof window !== "undefined") {
+    const runtimeUrl = window.__API_BASE__ || localStorage.getItem("SKYGUARD_API_URL");
+    if (runtimeUrl) {
+      return runtimeUrl.replace(/\/+$/, "");
+    }
+  }
+  return import.meta.env.VITE_API_BASE_URL || "http://127.0.0.1:8000";
+}
+
+const API_BASE = getApiBase();
 
 async function request(path, options = {}) {
+  const currentBase = getApiBase();
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), options.timeout ?? 20000);
 
   try {
-    const response = await fetch(`${API_BASE}${path}`, {
+    const response = await fetch(`${currentBase}${path}`, {
       ...options,
       signal: controller.signal,
       headers: {

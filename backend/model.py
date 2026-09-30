@@ -13,7 +13,19 @@ from sklearn.model_selection import train_test_split
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_DIR = os.path.join(BASE_DIR, "..", "models")
+
+# Support models inside backend/models, parent ../models, or via MODEL_DIR env var
+if os.environ.get("MODEL_DIR") and os.path.exists(os.environ.get("MODEL_DIR")):
+    MODEL_DIR = os.environ.get("MODEL_DIR")
+elif os.path.exists(os.path.join(BASE_DIR, "models", "anomaly_model.pkl")):
+    MODEL_DIR = os.path.join(BASE_DIR, "models")
+elif os.path.exists(os.path.join(BASE_DIR, "..", "models", "anomaly_model.pkl")):
+    MODEL_DIR = os.path.join(BASE_DIR, "..", "models")
+elif os.path.exists(os.path.join(BASE_DIR, "models")):
+    MODEL_DIR = os.path.join(BASE_DIR, "models")
+else:
+    MODEL_DIR = os.path.join(BASE_DIR, "..", "models")
+
 MODEL_FILE = os.path.join(MODEL_DIR, "anomaly_model.pkl")
 
 
